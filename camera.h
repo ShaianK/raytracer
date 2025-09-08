@@ -3,6 +3,10 @@
 
 #include "hittable.h"
 #include "material.h"
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <atomic>
 
 class camera {
   public:
@@ -24,15 +28,50 @@ class camera {
 
         std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
 
-        for (int j = 0; j < image_height; j++) {
-            std::clog << "\rScanlines remaining: " << (image_height - j) << ' ' << std::flush;
-            for (int i = 0; i < image_width; i++) {
-                color pixel_color(0, 0, 0);
-                for (int sample = 0; sample < samples_per_pixel; sample++) {
-                    ray r = get_ray(i, j);
-                    pixel_color += ray_color(r, max_depth, world);
+        std::vector<std::vector<color>> image_buffer(image_height, std::vector<color>(image_width));
+        
+        // Progress tracking
+        std::atomic<int> completed_rows{0};
+        std::mutex progress_mutex;
+        
+        // Should use windows.h to find number of threads instead of this method
+        int num_threads = std::thread::hardware_concurrency();
+        
+        std::vector<std::thread> threads;
+        int chunk_size = image_height / num_threads;
+        
+        for (int t = 0; t < num_threads; ++t) {
+            auto start_row = t * chunk_size;
+            auto end_row = (t == num_threads - 1) ? image_height : (t + 1) * chunk_size;
+            
+            threads.emplace_back([this, &world, &image_buffer, &completed_rows, &progress_mutex, start_row, end_row]() {
+                for (int j = start_row; j < end_row; j++) {
+                    for (int i = 0; i < image_width; i++) {
+                        color pixel_color(0, 0, 0);
+                        for (int sample = 0; sample < samples_per_pixel; sample++) {
+                            ray r = get_ray(i, j);
+                            pixel_color += ray_color(r, max_depth, world);
+                        }
+                        image_buffer[j][i] = pixel_samples_scale * pixel_color;
+                    }
+                    
+                    // Update progress
+                    auto current_completed = completed_rows.fetch_add(1);
+                    std::lock_guard<std::mutex> lock(progress_mutex);
+                    std::clog << "\rRows remaining: " << (image_height - current_completed) << ' ' << std::flush;
                 }
-                write_color(std::cout, pixel_samples_scale * pixel_color);
+            });
+        }
+        
+        // Wait for all threads to complete
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        
+        // Write stored pixel colors to PPM file
+        for (int j = 0; j < image_height; j++) {
+            for (int i = 0; i < image_width; i++) {
+                write_color(std::cout, image_buffer[j][i]);
             }
         }
 
